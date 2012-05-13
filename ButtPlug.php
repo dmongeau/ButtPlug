@@ -11,11 +11,11 @@ class ButtPlug {
 	
 	const VERSION = 0.1;
 	
-	public $apiClass;
-	public $response;
-	public $data;
-	
+	protected $_apiClass;
 	protected $_secret;
+	
+	public $request = array();
+	public $response = array();
 	
 	public $config = array(
 		'input_namespace' => 'buttplug'
@@ -51,7 +51,7 @@ class ButtPlug {
 			throw new Exception('Your receiver class must contains a secret key',500);
 		}
 		
-		$this->apiClass = $apiClass;
+		$this->_apiClass = $apiClass;
 		$this->_secret = $apiClass->secret;
 	}
 	
@@ -62,50 +62,70 @@ class ButtPlug {
 		else $query = $this->_getInputsFromURL($url);
 		
 		//Filter query
-		$this->data = array();
+		$data = array();
 		$namespace = $this->config['input_namespace'].'_';
 		$namespaceLength = strlen($namespace);
 		foreach($query as $key => $value) {
 			if(substr($key,0,$namespaceLength) == $namespace) {
-				$this->data[substr($key,$namespaceLength)] = $value;
+				$data[substr($key,$namespaceLength)] = $value;
 			}
 		}
 		
-		//Validate request
-		if(!isset($this->data['method'])) throw new Exception('No method',400);
-		if(!isset($this->data['signature'])) throw new Exception('No signature',401);
-		$method = $this->data['method'];
-		$signature = $this->data['signature'];
-		unset($this->data['signature']);
-		unset($this->data['method']);
-		if(isset($this->apiClass->debug) && $this->apiClass->debug === false) {
-			if(!$this->verifySignature($signature,$this->data)) throw new Exception('Invalid signature',403);
-		}
-		
-		//Execute request
-		switch($method) {
-			case 'version':
-				$response = self::VERSION;
-			break;
-			case 'listMethods':
-				if(!isset($this->apiClass->listMethods) || $this->apiClass->listMethods === true) {
-					$response = get_class_methods($this->apiClass);
-				} else {
-					throw new Exception('Method listing has been disabled',401);
-				}
-			break;
+		try {
 			
-			default:
-				if(!method_exists($this->apiClass,$method)) throw new Exception('Unknown method',405);
-				$response = $this->apiClass->$method($this->data);
-			break;
-		}
+			//Validate request
+			$callback = isset($data['callback']) && !empty($data['callback']) ? $data['callback']:null;
+			if(!isset($data['method']) || empty($data['method'])) throw new Exception('No method',400);
+			$method = $data['method'];
+			if(!isset($data['signature']) || empty($data['signature'])) throw new Exception('No signature',401);
+			$signature = $data['signature'];
+			unset($data['method'],$data['signature']);
+			if(isset($this->_apiClass->debug) && $this->_apiClass->debug === false) {
+				if(!$this->verifySignature($signature,$data)) throw new Exception('Invalid signature',403);
+			}
+			
+			//Create request
+			$this->request = array(
+				'method' => $method,
+				'signature' => $signature,
+				'callback' => isset($data['callback']) && !empty($data['callback']) ? $data['callback']:null,
+				'data' => $data
+			);
+			
+			//Execute request
+			switch($this->request['method']) {
+				case 'version':
+					$response = self::VERSION;
+				break;
+				case 'listMethods':
+					if(!isset($this->_apiClass->listMethods) || $this->_apiClass->listMethods === true) {
+						$response = get_class_methods($this->_apiClass);
+					} else {
+						throw new Exception('Method listing has been disabled',401);
+					}
+				break;
+				
+				default:
+					if(!method_exists($this->_apiClass,$this->request['method'])) throw new Exception('Unknown method',405);
+					$response = $this->_apiClass->{$this->request['method']}($this->request['data']);
+				break;
+			}
 		
-		//Set response
-		$this->response = array(
-			'success' => true,
-			'response' => $response
-		);
+			//Set response
+			$this->response = array(
+				'method' => $this->request['method'],
+				'success' => true,
+				'response' => $response
+			);
+			
+		} catch(Exception $e) {
+			
+			$method = isset($method) ? $method:null;
+			$callback = isset($callback) ? $callback:null;
+			$e = new ButtPlug_Exception($e->getMessage(),$e->getCode(),$method,$callback);
+			self::error($e);
+			
+		}
 		
 		
 	}
@@ -140,13 +160,13 @@ class ButtPlug {
 	
 	public function sendResponse() {
 		
-		self::response($this->response);
+		self::response($this->response,isset($this->request['callback']) ? $this->request['callback']:null);
 		
 	}
 	
 	public function errorHandler($code, $message, $file, $line) {
 		
-		if(!isset($this->apiClass) || (isset($this->apiClass->debug) && $this->apiClass->debug === false)) {
+		if(!isset($this->_apiClass) || (isset($this->_apiClass->debug) && $this->_apiClass->debug === false)) {
 			self::error(new Exception('Server error',500));
 		} else {
 			self::error(new Exception('Server error '.$code.': '.$message.' ('.$file.':'.$line.')',500));
@@ -154,10 +174,11 @@ class ButtPlug {
 		
 	}
 	
-	public static function response($data) {
+	public static function response($data,$callback = null) {
 		
 		header('Content-type: text/plain; charset="utf-8"');
-		echo json_encode($data);
+		if(!empty($callback)) echo $callback,'(',json_encode($data),');';
+		else echo json_encode($data);
 		exit();
 		
 	}
@@ -165,12 +186,13 @@ class ButtPlug {
 	public static function error($e) {
 		
 		self::response(array(
+			'method' => is_a($e,'ButtPlug_Exception') ? $e->getMethod():null,
 			'success' => false,
 			'error' => array(
 				'message' => is_a($e,'Exception') ? $e->getMessage():$e,
 				'code' => is_a($e,'Exception') ? $e->getCode():0
 			)
-		));
+		),is_a($e,'ButtPlug_Exception') ? $e->getCallback():null);
 		
 	}
 	
@@ -182,4 +204,25 @@ class ButtPlug {
 	
 	
 	
+}
+
+
+class ButtPlug_Exception extends Exception {
+	protected $method;
+	protected $callback;
+	
+	public function __construct($message = '',$code = 0, $method = null, $callback = null) {
+		$this->message = $message;
+		$this->code = $code;
+		$this->method = $method;
+		$this->callback = $callback;
+	}
+	
+	public function getMethod() {
+		return $this->method;
+	}
+	
+	public function getCallback() {
+		return $this->callback;
+	}
 }
