@@ -61,25 +61,33 @@ class ButtPlug {
 		if(is_array($url)) $query = $url;
 		else $query = $this->_getInputsFromURL($url);
 		
-		//Filter query
-		$data = array();
-		$namespace = $this->config['input_namespace'].'_';
-		$namespaceLength = strlen($namespace);
-		foreach($query as $key => $value) {
-			if(substr($key,0,$namespaceLength) == $namespace) {
-				$data[substr($key,$namespaceLength)] = $value;
+		$query = $this->_normalizeInputs($query);
+		
+		//Filter query by namespace
+		if(!empty($this->config['input_namespace'])) {
+			$data = array();
+			$namespace = $this->config['input_namespace'].'_';
+			$namespaceLength = strlen($namespace);
+			foreach($query as $key => $value) {
+				if(substr($key,0,$namespaceLength) == $namespace) {
+					$data[substr($key,$namespaceLength)] = $value;
+				}
 			}
+		} else {
+			$data = $query;
 		}
 		
 		try {
 			
-			//Validate request
+			//Get request
+			$method = isset($data['method']) && !empty($data['method']) ? $data['method']:null;
+			$signature = isset($data['signature']) && !empty($data['signature']) ? $data['signature']:null;
 			$callback = isset($data['callback']) && !empty($data['callback']) ? $data['callback']:null;
-			if(!isset($data['method']) || empty($data['method'])) throw new Exception('No method',400);
-			$method = $data['method'];
-			if(!isset($data['signature']) || empty($data['signature'])) throw new Exception('No signature',401);
-			$signature = $data['signature'];
-			unset($data['method'],$data['signature']);
+			unset($data['method'],$data['signature'],$data['callback']);
+			
+			//Validate request
+			if(empty($method)) throw new Exception('No method',400);
+			if(empty($signature)) throw new Exception('No signature',401);
 			if(isset($this->_apiClass->debug) && $this->_apiClass->debug === false) {
 				if(!$this->verifySignature($signature,$data)) throw new Exception('Invalid signature',403);
 			}
@@ -94,10 +102,12 @@ class ButtPlug {
 			
 			//Execute request
 			switch($this->request['method']) {
-				case 'version':
+				
+				//Core Methods
+				case '_version':
 					$response = self::VERSION;
 				break;
-				case 'listMethods':
+				case '_listMethods':
 					if(!isset($this->_apiClass->listMethods) || $this->_apiClass->listMethods === true) {
 						$response = get_class_methods($this->_apiClass);
 					} else {
@@ -105,6 +115,7 @@ class ButtPlug {
 					}
 				break;
 				
+				//API Methods
 				default:
 					if(!method_exists($this->_apiClass,$this->request['method'])) throw new Exception('Unknown method',405);
 					$response = $this->_apiClass->{$this->request['method']}($this->request['data']);
@@ -128,6 +139,18 @@ class ButtPlug {
 		}
 		
 		
+	}
+	
+	protected function _normalizeInputs($query) {
+		$inputs = array();
+		foreach($query as $key => $value) {
+			if($obj = self::isJSON($value))  {
+				$inputs[$key] = $obj;
+			} else {
+				$inputs[$key] = $value;
+			}
+		}
+		return $inputs;
 	}
 	
 	protected function _getInputsFromURL($url) {
@@ -172,6 +195,11 @@ class ButtPlug {
 			self::error(new Exception('Server error '.$code.': '.$message.' ('.$file.':'.$line.')',500));
 		}
 		
+	}
+	
+	public static function isJSON($string) {
+		$obj = json_decode($string);
+		return json_last_error() == JSON_ERROR_NONE ? $obj:false;
 	}
 	
 	public static function response($data,$callback = null) {
